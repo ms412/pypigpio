@@ -1,0 +1,17 @@
+[Unit]
+Description=Pypigpio GPIO Socket Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/py-pigpio
+ExecStart=/root/py-pigpio/.venv/bin/python /root/py-pigpio/Pypigpio.py
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
