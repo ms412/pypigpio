@@ -121,7 +121,7 @@ class Pypigpio(object):
         return True
 
     def start_gpio(self):
-        self._gpio = GpiodBackend(chip_path=self._chip_path, consumer=self._consumer, hw_revision=self._hw_revision)
+        self._gpio = GpiodBackend(chip_path=self._chip_path, consumer=self._consumer, hw_revision=self._hw_revision, logger=self._logger)
         return True
 
     def start_server(self):

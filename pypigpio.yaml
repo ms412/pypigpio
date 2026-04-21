@@ -1,6 +1,6 @@
 app:
   name: pypigpio
-  version: "0.03"
+  version: "0.13"
 
 gpio:
   CHIP_PATH: /dev/gpiochip0

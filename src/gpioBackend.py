@@ -72,10 +72,13 @@ class GpiodBackend(GpioBackend):
         chip_path: str = "/dev/gpiochip0",
         consumer: str = "openhab-pigpio-bridge",
         hw_revision: int = DEFAULT_HW_REVISION,
+        logger: Optional[logging.Logger] = None,
     ) -> None:
+    
         self.chip_path = chip_path
         self.consumer = consumer
         self.hw_revision = hw_revision
+        self._logger = logger or logging.getLogger("Pypigpio.GpiodBackend")
 
         self._chip = gpiod.Chip(chip_path)
         self._lock = threading.RLock()

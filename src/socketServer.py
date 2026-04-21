@@ -42,6 +42,7 @@ class SocketServer:
         port: int = 8888,
         logger: Optional[logging.Logger] = None,
     ) -> None:
+    
         self.host = host
         self.port = port
         self._gpio_factory = gpio_factory
