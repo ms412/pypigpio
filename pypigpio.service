@@ -1,5 +1,11 @@
+#Contents of /etc/systemd/system/pypigpio.service
+#systemctl daemon-reload
+#systemctl enable pypigpio.service
+#systemctl start pypigpio.service
+
+
 [Unit]
-Description=Pypigpio GPIO Socket Server
+Description=Pypigpio Daemon GPIO Socket Server
 After=network.target
 Wants=network.target
 
@@ -7,8 +13,8 @@ Wants=network.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/root/py-pigpio
-ExecStart=/root/py-pigpio/.venv/bin/python /root/py-pigpio/Pypigpio.py
+WorkingDirectory=/opt/pypigpio
+ExecStart=/opt/pypigpio/.venv/bin/python /opt/pypigpio/pypigpio.py
 Restart=on-failure
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1

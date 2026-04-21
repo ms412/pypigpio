@@ -1,135 +1,173 @@
+from __future__ import annotations
 
+import logging
 import socket
 import struct
 import threading
-import time
+from typing import Optional, Tuple
+
+from src.gpioBackend import BackendFactory, GpioBackend, to_int32
+
+PI_CMD_MODES = 0
+PI_CMD_MODEG = 1
+PI_CMD_READ = 3
+PI_CMD_WRITE = 4
+PI_CMD_BR1 = 10
+PI_CMD_TICK = 16
+PI_CMD_HWVER = 17
+PI_CMD_NOOP = 18
+PI_CMD_VER = 26
+PI_CMD_NOIB = 99
+
+PIGPIO_VERSION = 79
 
 
-# PIGPIO Konstanten
-PI_CMD_MODES = 0    # Set Mode
-PI_CMD_MODEG = 1    # Get Mode
-PI_CMD_READ  = 3    # Read
-PI_CMD_WRITE = 4    # Write
-PI_CMD_BR1   = 10   # Bank 1 Read
-PI_CMD_TICK  = 16   # Get Tick
-PI_CMD_HWVER = 17   # HW Version
-PI_CMD_VER   = 26   # PIGPIO Version
-PI_CMD_NOIB  = 99   # Handshake
-
-VERSION = 79
-START_TIME = time.monotonic()
+def recv_all(conn: socket.socket, size: int) -> Optional[bytes]:
+    data = b""
+    while len(data) < size:
+        chunk = conn.recv(size - len(data))
+        if not chunk:
+            return None
+        data += chunk
+    return data
 
 
-class socketServer:
-    def __init__(self, host, port):
+class SocketServer:
+    """Socket/protocol layer only."""
+
+    def __init__(
+        self,
+        gpio_factory: BackendFactory,
+        host: str = "0.0.0.0",
+        port: int = 8888,
+        logger: Optional[logging.Logger] = None,
+    ) -> None:
         self.host = host
         self.port = port
-    
+        self._gpio_factory = gpio_factory
+        self._gpio: GpioBackend = gpio_factory()
+        self._logger = logger or logging.getLogger("Pypigpio.Server")
 
-    def handle_client(conn, addr, chip):
-        print(f"[+] Client verbunden: {addr}")
-        try:
-            while True:
-                data = conn.recv(16)
-                if not data or len(data) < 16:
+        self._server_socket: Optional[socket.socket] = None
+        self._running = False
+
+    def start(self) -> None:
+        self._running = True
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            self._server_socket = server
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((self.host, self.port))
+            server.listen()
+
+            self._logger.info("pigpio server listening on %s:%d", self.host, self.port)
+
+            while self._running:
+                try:
+                    conn, addr = server.accept()
+                except OSError:
                     break
 
-                cmd, p1, p2, p3 = struct.unpack("IIII", data)
+                thread = threading.Thread(
+                    target=self._handle_client,
+                    args=(conn, addr),
+                    daemon=True,
+                )
+                thread.start()
 
-                # LOGGING: Eingehend
-                print(f"  --> RECV: CMD={cmd:2} | p1={p1:<10} | p2={p2:<10} | p3={p3:<10}")
+    def stop(self) -> None:
+        self._running = False
 
-                result = 0
+        if self._server_socket is not None:
+            try:
+                self._server_socket.close()
+            except Exception:
+                pass
 
-                try:
-                    if cmd == PI_CMD_NOIB:
-                        print(">>> handshake from client")
-                        result = 0
+        self._gpio.close()
 
-                    elif cmd == PI_CMD_VER:
-                        print(">>> version request from client")
-                        result = VERSION
+    def _dispatch(self, cmd: int, p1: int, p2: int, p3: int) -> int:
+        self._logger.debug("dispatching cmd=%d p1=%d p2=%d p3=%d", cmd, p1, p2, p3)
 
-                    elif cmd == PI_CMD_TICK:
-                        result = get_tick()
-                        print(">>> tick request from client",result)
+        if cmd == PI_CMD_NOIB:
+            return 0
 
-                    elif cmd == PI_CMD_HWVER:
-                        print(">>> hardware version request from client")
-                        result = 0xA02082 # Pi Revision
-                        result = get_rpi_revision() or 0xA02082
-                    #  print(hex(result))
-                        print(f"Raspberry Pi Revision: {hex(result)}")
-                        revision = result 
+        if cmd == PI_CMD_NOOP:
+            return 0
 
-                    # MODES: p1=gpio, p2=mode (0:IN, 1:OUT)
-                    elif cmd == PI_CMD_MODES:
-                        print(f">>> set mode request: GPIO {p1} -> {'OUTPUT' if p2 == 1 else 'INPUT'}")
-                        get_gpio_line(chip, p1, mode=p2)
-                        result = 0
+        if cmd == PI_CMD_VER:
+            return PIGPIO_VERSION
 
-                    # WRITE: p1=gpio, p2=level (0:Low, 1:High)
-                    elif cmd == PI_CMD_WRITE:
-                        print(f">>> write request: GPIO {p1} -> {'HIGH' if p2 == 1 else 'LOW'}")
-                        line = get_gpio_line(chip, p1)
-                        val = Value.ACTIVE if p2 else Value.INACTIVE
-                        line.set_value(p1, val)
-                        result = 0
+        if cmd == PI_CMD_HWVER:
+            return self._gpio.get_hw_revision()
 
-                    # READ: p1=gpio
-                    elif cmd == PI_CMD_READ:
-                        print(f">>> read request: GPIO {p1}")   
-                        line = get_gpio_line(chip, p1)
-                        val = line.get_value(p1)
-                        result = 1 if val == Value.ACTIVE else 0
+        if cmd == PI_CMD_TICK:
+            return self._gpio.get_tick()
 
-                    # BANK READ 1 (GPIO 0-31)
-                    elif cmd == PI_CMD_BR1:
-                        print(">>> bank read 1 request from client")
-                        bank = 0
-                        with lock:
-                            for offset, req in active_lines.items():
-                                if 0 <= offset < 32:
-                                    if req.get_value(offset) == Value.ACTIVE:
-                                        bank |= (1 << offset)
-                        result = bank
+        if cmd == PI_CMD_MODES:
+            return self._gpio.set_mode(p1, p2)
 
-                except Exception as e:
-                    print(f"[!] GPIO Fehler bei Pin {p1}: {e}")
-                    result = -1
+        if cmd == PI_CMD_MODEG:
+            return self._gpio.get_mode(p1)
 
-                # PIGPIO Response: cmd, p1, p2, result (jeweils 4 Bytes)
-                response = struct.pack("IIII", cmd, p1, p2, result & 0xFFFFFFFF)
+        if cmd == PI_CMD_READ:
+            return self._gpio.read(p1)
 
-                # LOGGING: Ausgehend
-                print(f"  <-- SEND: CMD={cmd:2} | p1={p1:<10} | p2={p2:<10} | res={result:<10}")
+        if cmd == PI_CMD_WRITE:
+            return self._gpio.write(p1, p2)
 
-                try:
-                    conn.sendall(response)
-                except Exception as e:
-                    print(f"[!] Fehler beim Senden der Antwort an {addr}: {e}"  )
+        if cmd == PI_CMD_BR1:
+            return self._gpio.read_bank1()
 
-        finally:
-            conn.close()
-            print(f"[-] Client getrennt: {addr}")
+        return -1
 
-    def start_server():
-        print(f"PIGPIO-gpiod Bridge läuft auf {self.host}:{self.port}")
+    def _handle_client(self, conn: socket.socket, addr: Tuple[str, int]) -> None:
+        self._logger.info("client connected: %s", addr)
 
-        print(f"Raspberry Pi Revision: {hex(get_rpi_revision())}")
-
-        
-        # Chip einmalig beim Start öffnen
-        with gpiod.Chip(CHIP_PATH) as chip:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind((self.host, self.port))
-            s.listen()
-
+        try:
             while True:
-                conn, addr = s.accept()
-                threading.Thread(
-                    target=handle_client,
-                    args=(conn, addr, chip),
-                    daemon=True
-                ).start()
+                data = recv_all(conn, 16)
+                if data is None:
+                    break
+
+                cmd, p1, p2, p3 = struct.unpack("<iiii", data)
+
+                try:
+                    res = self._dispatch(cmd, p1, p2, p3)
+                except ValueError as exc:
+                    self._logger.warning("invalid request from %s: %s", addr, exc)
+                    res = -2
+                except Exception as exc:
+                    self._logger.exception("backend error from %s: %s", addr, exc)
+                    res = -3
+
+                self._logger.debug("RESP cmd=%3d p1=%3d p2=%3d p3=%11d -> RES %d", cmd, p1, p2, p3, res)
+
+                response = struct.pack(
+                    "<iiii",
+                    to_int32(cmd),
+                    to_int32(p1),
+                    to_int32(p2),
+                    to_int32(res),
+                )
+                conn.sendall(response)
+
+                self._logger.debug(
+                    "REQ cmd=%3d p1=%3d p2=%3d p3=%11d -> RES %d",
+                    cmd,
+                    p1,
+                    p2,
+                    p3,
+                    res,
+                )
+
+        except ConnectionResetError:
+            pass
+        except OSError as exc:
+            self._logger.warning("socket error with %s: %s", addr, exc)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._logger.info("client disconnected: %s", addr)
